@@ -1,6 +1,6 @@
 /*
  * BLE -> Wahoo Direct Connect (DirCon) bridge: BLE heart rate sensor + cadence sensor / power meter
- * Version: 2026.1.1 (year.major.minor, see FIRMWARE_VERSION)
+ * Version: 2026.2.1 (year.major.minor, see FIRMWARE_VERSION)
  * Target : Seeed XIAO ESP32S3 (any ESP32-S3 / ESP32 works)
  * Needs  : Arduino-ESP32 core 3.x, NimBLE-Arduino 2.x
  *
@@ -122,7 +122,7 @@ static const char* const TRAINER_NAME_PREFIXES[] = { nullptr };
 
 // Firmware version: year.major.minor. Shown in the footer of the Wi-Fi setup page and in the debug
 // log at start-up. Keep it equal to the number in the file name when a new version is made.
-#define FIRMWARE_VERSION   "2026.1.1"
+#define FIRMWARE_VERSION   "2026.2.1"
 
 // --- Status LEDs ------------------------------------------------------------------------------
 // One GPIO per LED, -1 = LED not fitted. XIAO ESP32S3 pins: D0=1 D1=2 D2=3 D3=4 D4=5 D5=6 D6=43 D7=44
@@ -179,7 +179,8 @@ constexpr uint8_t  MAX_SENSORS  = 3;   // NimBLE default allows 3 simultaneous c
 constexpr uint8_t  MAX_GROUPS   = 3;
 constexpr uint8_t  MAX_SERVICES = 3;   // services per sensor
 constexpr uint8_t  MAX_CHARS    = 3;   // characteristics per service
-constexpr uint8_t  MAX_CLIENTS  = 2;   // simultaneous TCP clients per DirCon device
+constexpr uint8_t  MAX_CLIENTS  = 2;   // default for simultaneous TCP clients per DirCon device (changeable in maintenance mode)
+constexpr uint8_t  MAX_CLIENTS_LIMIT = 5;   // upper end of the setting; size of the client table
 constexpr size_t   MAX_VALUE    = 64;  // max bytes of one BLE value we forward
 constexpr uint16_t SVC_BATTERY_UUID = 0x180F;
 constexpr uint16_t SVC_DEVINFO_UUID = 0x180A;   // Device Information Service
@@ -652,8 +653,10 @@ static void enableKeepAlive(WiFiClient& s) {
 // User settings (maintenance page, NVS namespace "settings"); loaded early in setup().
 static uint8_t cfgGroup = SENSOR_GROUP;    // 1 = separate devices, 0 = combined
 static String  cfgName;                    // "" = use the MAC suffix in the device names
+static uint8_t cfgMaxClients = MAX_CLIENTS;  // simultaneous app connections per DirCon device (2..MAX_CLIENTS_LIMIT)
 static bool      cfgDhcp = true;           // true = address from DHCP, false = fixed address below
 static IPAddress cfgIp, cfgMask, cfgGw;    // used when cfgDhcp is false (gateway 0.0.0.0 = none)
+static IPAddress cfgDns;                   // optional DNS server for the fixed address (0.0.0.0 = none)
 
 // Last two bytes of this board's Wi-Fi MAC as 4 hex digits ("3A4F"), same on every call.
 // Readable from the chip before Wi-Fi is started.
@@ -682,7 +685,7 @@ class DirconDevice {
     struct PendingRead {                                   // read requests whose reply is held back
       bool active = false; uint8_t seq = 0, s = 0, a = 0, c = 0; uint32_t deadline = 0;
     } pending[2];
-  } clients[MAX_CLIENTS];
+  } clients[MAX_CLIENTS_LIMIT];
 
   DirconDevice(uint8_t g) : group(g), port(DIRCON_BASE_PORT + g) { buildInstance(); }
 
@@ -926,10 +929,10 @@ class DirconDevice {
     }
     if (nc) {
       Client* slot = nullptr;
-      for (auto& cl : clients) if (!cl.active) { slot = &cl; break; }
+      for (uint8_t k = 0; k < cfgMaxClients; k++) if (!clients[k].active) { slot = &clients[k]; break; }
       if (!slot) {                              // full: evict the oldest
         slot = &clients[0];
-        for (auto& cl : clients) if (cl.since < slot->since) slot = &cl;
+        for (uint8_t k = 1; k < cfgMaxClients; k++) if (clients[k].since < slot->since) slot = &clients[k];
         drop(*slot);
       }
       slot->sock = nc;
@@ -1048,6 +1051,7 @@ static void buildGroups() {
 //   DIRCON  : at least one app is connected to one of the DirCon devices
 //   BLE HR  : the heart rate sensor is connected over BLE
 //   BLE CAD : the cadence sensor or power meter (slot 1) is connected over BLE
+// A sensor LED goes off briefly every 3 s while that sensor's battery is below 25 %.
 // At power-on all four flash briefly. In pairing mode BLE HR / BLE CAD blink until their sensor
 // has been found, then stay on (see runPairing()).
 // ============================================================================
@@ -1058,6 +1062,23 @@ static const int8_t LED_PINS[4] = { LED_WIFI_GPIO, LED_DIRCON_GPIO, LED_BLE_HR_G
 static void ledWrite(int8_t pin, bool on) {
   if (pin < 0) return;
   digitalWrite(pin, (on != (LED_ACTIVE_LOW != 0)) ? HIGH : LOW);
+}
+
+// Battery level (0..100) of a connected sensor, read in this connection; -1 when not known (yet).
+static int batteryPercent(uint8_t i) {
+  int level = -1;
+  const SensorDef& d = SENSORS[i];
+  for (uint8_t si = 0; si < d.numServices; si++) {
+    if (d.services[si].uuid != SVC_BATTERY_UUID) continue;
+    for (uint8_t ci = 0; ci < d.services[si].numChars; ci++) {
+      if (d.services[si].chars[ci].uuid != 0x2A19) continue;
+      portENTER_CRITICAL(&cacheMux);
+      const CharCache& cc = rt[i].cache[si][ci];
+      if (cc.valid && cc.settled && cc.len >= 1) level = cc.data[0];
+      portEXIT_CRITICAL(&cacheMux);
+    }
+  }
+  return level > 100 ? -1 : level;
 }
 
 static void ledsBegin() {
@@ -1073,6 +1094,19 @@ static bool anyAppConnected() {
   return false;
 }
 
+// Low battery (below BATT_LOW_PERCENT) of the connected sensor of a slot; unknown level = not low.
+constexpr int      BATT_LOW_PERCENT = 25;
+constexpr uint32_t BATT_DIP_PERIOD_MS = 3000;   // a low battery turns the sensor LED off once per period ...
+constexpr uint32_t BATT_DIP_LEN_MS    = 200;    // ... for this long
+static bool slotBatteryLow(uint8_t slot) {
+  for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+    if (SENSORS[i].slot != slot || !rt[i].connected) continue;
+    int b = batteryPercent(i);
+    return b >= 0 && b < BATT_LOW_PERCENT;
+  }
+  return false;
+}
+
 static void ledsUpdate() {
   bool state[4] = {
     WiFi.status() == WL_CONNECTED,
@@ -1080,6 +1114,11 @@ static void ledsUpdate() {
     rt[SENSOR_HR].connected.load(),
     slotConnected(1),                                 // cadence sensor or power meter
   };
+  // Low battery: the sensor LED is briefly turned off every 3 seconds.
+  if ((millis() % BATT_DIP_PERIOD_MS) < BATT_DIP_LEN_MS) {
+    if (state[LED_BLE_HR]  && slotBatteryLow(0)) state[LED_BLE_HR]  = false;
+    if (state[LED_BLE_CAD] && slotBatteryLow(1)) state[LED_BLE_CAD] = false;
+  }
   static int8_t last[4] = {-1, -1, -1, -1};           // only touch a pin when its state changes
   for (uint8_t i = 0; i < 4; i++)
     if (last[i] != (int8_t)state[i]) { last[i] = (int8_t)state[i]; ledWrite(LED_PINS[i], state[i]); }
@@ -1344,6 +1383,9 @@ td+td{text-align:right;padding-left:12px}
 h2{font-size:16px;margin:22px 0 4px}
 .ok{color:#1e8449;font-weight:600}
 .no{color:#6b7684}
+.bg{color:#1e8449;font-weight:600}
+.bm{color:#d35400;font-weight:600}
+.br{color:#c0392b;font-weight:600}
 .dng{background:#c0392b;color:#fff;font-weight:600}
 .hint{font-size:13px;color:#6b7684;margin:4px 0 0}
 footer{text-align:center;color:#6b7684;font-size:13px;padding:8px 16px 24px}
@@ -1485,9 +1527,12 @@ static void loadSettings() {
   cfgGroup = sp.getUChar("group", SENSOR_GROUP);
   if (cfgGroup > 1) cfgGroup = SENSOR_GROUP;
   cfgName  = sp.getString("name", "");
+  cfgMaxClients = sp.getUChar("maxcl", MAX_CLIENTS);
+  if (cfgMaxClients < 2 || cfgMaxClients > MAX_CLIENTS_LIMIT) cfgMaxClients = MAX_CLIENTS;
   cfgDhcp  = sp.getBool("dhcp", true);
   if (!cfgIp.fromString(sp.getString("ip", ""))     || !cfgMask.fromString(sp.getString("mask", ""))) cfgDhcp = true;
   if (!cfgGw.fromString(sp.getString("gw", "")))    cfgGw = IPAddress(0, 0, 0, 0);
+  if (!cfgDns.fromString(sp.getString("dns", ""))) cfgDns = IPAddress(0, 0, 0, 0);
   sp.end();
   for (uint8_t i = 0; i < NUM_SENSORS; i++)
     if (SENSORS[i].slot == 1) SENSORS[i].group = cfgGroup;      // HR (slot 0) always stays in group 0
@@ -1498,10 +1543,12 @@ static void saveSettings(uint8_t group, const String& name) {
   sp.begin(SETTINGS_NVS_NAMESPACE, false);
   sp.putUChar("group", group);
   sp.putString("name", name);
+  sp.putUChar("maxcl", cfgMaxClients);
   sp.putBool("dhcp", cfgDhcp);
   sp.putString("ip", cfgIp.toString());
   sp.putString("mask", cfgMask.toString());
   sp.putString("gw", cfgGw.toString());
+  sp.putString("dns", cfgDns.toString());
   sp.end();
 }
 
@@ -1556,7 +1603,10 @@ static void eraseAllSettings() {
 // Blocks until connected (maxMs = 0: for ever, retrying); false when maxMs ran out.
 static bool connectWifi(uint32_t maxMs) {
   WiFi.mode(WIFI_STA);
-  if (!cfgDhcp) WiFi.config(cfgIp, cfgGw, cfgMask);      // fixed address; must be set before begin()
+  if (!cfgDhcp) {                                         // fixed address; must be set before begin()
+    if (!(cfgDns == IPAddress(0, 0, 0, 0))) WiFi.config(cfgIp, cfgGw, cfgMask, cfgDns);
+    else                                 WiFi.config(cfgIp, cfgGw, cfgMask);
+  }
   WiFi.setSleep(false);               // lower, steadier latency
   WiFi.setAutoReconnect(true);
   const char* wifiPassC = wifiPass.length() ? wifiPass.c_str() : nullptr;   // empty = open network
@@ -1620,13 +1670,35 @@ static String statusRow(const String& label, const String& value, const char* cl
 }
 
 // One line per slot: the connected sensor of that slot, or "searching".
+// The battery level follows the sensor name: green > 50 %, orange 25..50 %, red < 25 %.
 static String slotStatus(uint8_t slot, const char* label) {
   for (uint8_t i = 0; i < NUM_SENSORS; i++) {
     if (SENSORS[i].slot != slot || !rt[i].connected) continue;
     String v = String(SENSORS[i].name) + ": " + htmlEsc(devNameC[i]);
+    int b = batteryPercent(i);
+    if (b >= 0) {
+      const char* bc = b > 50 ? "bg" : (b >= 25 ? "bm" : "br");
+      // Small battery icon (inline SVG, takes the text colour; fill width follows the level).
+      v += String(" <span class=") + bc + ">(<svg width=18 height=10 viewBox='0 0 18 10' "
+           "style='vertical-align:-1px'><rect x=.5 y=.5 width=14 height=9 rx=1 fill=none stroke=currentColor />"
+           "<rect x=15 y=3 width=2 height=4 fill=currentColor /><rect x=2 y=2 width=" + String(b * 11 / 100.0f, 1) +
+           " height=6 fill=currentColor /></svg> " + b + "%)</span>";
+    }
     return statusRow(label, v, "ok");
   }
   return statusRow(label, "searching", "no");
+}
+
+// Line below a sensor: app connections to the DirCon device that serves this slot, actual/maximum.
+static String slotConns(uint8_t slot) {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < NUM_SENSORS; i++) {
+    if (SENSORS[i].slot != slot) continue;
+    uint8_t g = SENSORS[i].group;
+    if (g < numGroups && groups[g]) n = groups[g]->clientCount();
+    break;
+  }
+  return statusRow("&nbsp;&nbsp;App connections", String(n) + "/" + String(cfgMaxClients), n ? "ok" : "no");
 }
 
 static String statusPage() {
@@ -1634,17 +1706,16 @@ static String statusPage() {
   char ups[24];
   snprintf(ups, sizeof(ups), "%ud %02u:%02u:%02u", (unsigned)(up / 86400), (unsigned)(up / 3600 % 24),
            (unsigned)(up / 60 % 60), (unsigned)(up % 60));
-  uint8_t apps = 0;
-  for (uint8_t g = 0; g < numGroups; g++) if (groups[g]) apps += groups[g]->clientCount();
 
   String p = pageHeader("Status");
   p += "<table>";
   p += statusRow("Wi-Fi", htmlEsc(wifiSsid) + " (" + String(WiFi.RSSI()) + " dBm)");
   p += statusRow("IP address", WiFi.localIP().toString() + (cfgDhcp ? " (DHCP)" : " (fixed)"));
   p += slotStatus(0, "Heart rate");
+  p += slotConns(0);
   p += slotStatus(1, "Power / cadence");
+  p += slotConns(1);
   p += statusRow("Layout", cfgGroup ? "Separate devices" : "Combined device");
-  p += statusRow("App connections", String(apps), apps ? "ok" : "no");
   p += statusRow("Uptime", ups);
   p += "</table>";
   p += "<h2>Maintenance</h2><p class=hint>Stops the bridging. Then the settings can be changed. "
@@ -1744,6 +1815,12 @@ static String maintPage() {
   p += "<label>Device name</label><input type=text name=name maxlength=20 value=\"" + htmlEsc(cfgName) + "\">";
   p += "<p class=hint>Appended to the DirCon device names and used in the web address. Empty = last 4 digits of the MAC address. "
        "Letters, digits, space, - and _ only.</p>";
+  p += "<label>Maximum concurrent connections per sensor</label><select name=maxcl>";
+  for (uint8_t n = 2; n <= MAX_CLIENTS_LIMIT; n++)
+    p += String("<option value=") + n + (n == cfgMaxClients ? " selected" : "") + ">" + n + "</option>";
+  p += "</select><p class=hint>Applies to each sensor separately: every sensor accepts this many app connections "
+       "(with the combined layout, the one combined device accepts this many).</p>"
+       "<div class=note style=\"margin-top:10px\"><b>Warning:</b> setting this to more than 2 can cause issues.</div>";
   p += "<button class=\"btn pri\" type=submit>Save DirCon setup</button></form></div>";
 
   // ---- Network setup
@@ -1757,9 +1834,11 @@ static String maintPage() {
        htmlEsc(cfgDhcp ? String("255.255.255.0") : cfgMask.toString()) + "\">";
   p += "<label>Gateway (optional)</label><input type=text name=gw inputmode=decimal placeholder=\"192.168.1.1\" value=\"" +
        String((cfgDhcp || cfgGw == IPAddress(0, 0, 0, 0)) ? "" : htmlEsc(cfgGw.toString())) + "\">";
+  p += "<label>DNS server (optional)</label><input type=text name=dns inputmode=decimal placeholder=\"192.168.1.1\" value=\"" +
+       String((cfgDhcp || cfgDns == IPAddress(0, 0, 0, 0)) ? "" : htmlEsc(cfgDns.toString())) + "\">";
   p += "<div class=note style=\"margin-top:10px\"><b>Fixed address:</b> choose an address <b>outside the range your router's DHCP "
        "server hands out</b> and not used by another device (see the DHCP settings of your router), in the same subnet as your network. "
-       "The three fields are ignored when &quot;Automatic (DHCP)&quot; is selected. If the bridge cannot be reached afterwards, hold the "
+       "The four fields are ignored when &quot;Automatic (DHCP)&quot; is selected. If the bridge cannot be reached afterwards, hold the "
        "Wi-Fi setup button while connecting power and save the network again: that returns the bridge to DHCP.</div>";
   p += "<button class=\"btn pri\" type=submit>Save network setup</button></form></div>";
 
@@ -1802,8 +1881,11 @@ static void handleDirconSave() {
   }
   name.trim();
   if (name.length() > 20) name = name.substring(0, 20);
+  int mc = webServer->arg("maxcl").toInt();
+  if (mc < 2 || mc > MAX_CLIENTS_LIMIT) mc = cfgMaxClients;
   cfgGroup = g;
   cfgName = name;
+  cfgMaxClients = (uint8_t)mc;
   saveSettings(g, name);                          // the network values in cfg* are saved unchanged
   maintMsg = "DirCon setup saved. It is used after you leave the maintenance mode.";
   sendRedirectHome();
@@ -1814,16 +1896,18 @@ static void handleNetworkSave() {
   bool dhcp = webServer->arg("net") != "fixed";
   IPAddress ip, mask, gw(0, 0, 0, 0);
   if (!dhcp) {
-    String sIp = webServer->arg("ip"), sMask = webServer->arg("mask"), sGw = webServer->arg("gw");
-    sIp.trim(); sMask.trim(); sGw.trim();
+    String sIp = webServer->arg("ip"), sMask = webServer->arg("mask"), sGw = webServer->arg("gw"), sDns = webServer->arg("dns");
+    sIp.trim(); sMask.trim(); sGw.trim(); sDns.trim();
+    IPAddress dns(0, 0, 0, 0);
     bool haveGw = sGw.length() > 0;
     String err;
     if (!ip.fromString(sIp))                       err = "the IP address is not valid (four numbers, for example 192.168.1.50).";
     else if (!mask.fromString(sMask))              err = "the subnet mask is not valid (for example 255.255.255.0).";
     else if (haveGw && !gw.fromString(sGw))        err = "the gateway is not valid (for example 192.168.1.1).";
+    else if (sDns.length() && !dns.fromString(sDns)) err = "the DNS server is not valid (for example 192.168.1.1).";
     else                                           err = checkFixedIp(ip, mask, gw, haveGw);
     if (err.length()) { maintMsg = "Network setup not saved: " + err; sendRedirectHome(); return; }
-    cfgIp = ip; cfgMask = mask; cfgGw = gw;
+    cfgIp = ip; cfgMask = mask; cfgGw = gw; cfgDns = dns;
   }
   cfgDhcp = dhcp;
   saveSettings(cfgGroup, cfgName);                // the DirCon values in cfg* are saved unchanged
