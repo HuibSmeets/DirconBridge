@@ -5,8 +5,19 @@ continue in a new conversation without any memory of earlier ones. Give this fil
 `.ino` file** (and, for documentation changes, the files in `doc_sources/`) to the assistant.
 
 - **Product:** BLE - DirCon Bridge, by PulseFlow Engineering (`MANUFACTURER_NAME` in the source)
-- **Current firmware:** 2026.1.1 (`dircon_bridge_2026.1.1.ino`), first production line (2026.1.0 was the first production release)
-- **Status of this reference:** written at the end of the first development phase (November 2026)
+- **Current firmware:** 2026.2.1 (`dircon_bridge_2026.2.1.ino`), second production line. 2026.1.0 was the first production release and 2026.1.1 the last release of the first line. **2026.2.1 has not been compiled or tested on hardware yet and is not released**; it was built from 2026.1.1 (via the development version 2026.2.dev).
+- **Status of this reference:** written at the end of the first development phase (November 2026); updated 26 November 2026 for firmware 2026.2.1 (see "Changes in 2026.2.1" below)
+
+---
+
+## Changes in 2026.2.1 (compared with 2026.1.1)
+
+1. **Status page, battery level:** after the sensor name, `(battery icon NN%)`; green above 50 %, orange 25..50 %, red below 25 %. Not shown while the level is unknown (not read yet in this connection).
+2. **Status page, app connections per sensor:** the single "App connections" row is gone. Under each sensor line (Heart rate, Power / cadence) an indented "App connections" line shows `actual/maximum` for the DirCon device serving that slot (combined layout: both lines show the same device).
+3. **Maintenance page, DirCon setup card:** new select "Maximum concurrent connections per sensor" (2..5, default 2) below the device name, with a warning that more than 2 can cause issues. The limit is enforced **per DirCon device**; a new connection at the limit evicts the oldest one of that device.
+4. **Low-battery LED:** a connected sensor with a battery level below 25 % has its LED (HR or Cadence/Power) turned off for 0.2 s every 3 s. Always active, no setting.
+5. **Fixed IP: DNS server:** optional "DNS server" field in the Network setup card (stored as `dns`, passed to `WiFi.config()` when set; empty = as before).
+6. **Version:** `2026.2.1` in file name, header comment and `FIRMWARE_VERSION`. Nothing in the user manual, recovery guide or release notes has been updated for these changes yet.
 
 ---
 
@@ -27,16 +38,18 @@ Key functions:
 | Naming | `DirCon HR xxxx`, `DirCon CAD xxxx`, `DirCon PWR xxxx`, combined: `DirCon Sensors xxxx`; `xxxx` = MAC digits or user device name |
 | Model # | Manufacturer read from the sensor + BLE name, e.g. "<brand> <name>" (`devName`) |
 | Wi-Fi setup | AP `DirCon-Setup-<MAC4>` + captive portal, 192.168.4.1; credentials in NVS |
-| Status page | Always on port 80 in normal operation, own task, read-only, button to enter maintenance mode |
+| Status page | Always on port 80 in normal operation, own task, read-only, button to enter maintenance mode; shows the sensor battery level (colour coded) and the app connections per sensor as `actual/maximum` |
+| Connection limit | Maximum simultaneous app connections per DirCon device, 2..5 (default 2), set in maintenance mode |
+| Low-battery signal | Sensor LED goes off briefly every 3 s while that sensor's battery is below 25 % |
 | Maintenance mode | Bridging stopped; settings, pairing, firmware upload, factory reset; no password |
-| Fixed IP | DHCP (default) or fixed IP / mask / optional gateway |
+| Fixed IP | DHCP (default) or fixed IP / mask / optional gateway / optional DNS server |
 | Factory reset | In maintenance mode (confirm dialog) or both buttons at power-on (10 s hold + LED countdown) |
 | Firmware update | Upload `.ino.bin` via maintenance page (Update.h into inactive OTA slot) |
 | Recovery | USB: web flasher or esptool with the **merged** image at 0x0 |
 
 Not implemented (deliberately or not yet): web password/auth, GitHub/online update, OTA rollback, ANT+,
 secure-BLE bonding (Garmin HR straps with security enabled would need it; NimBLE supports it),
-DNS server setting for fixed IP, settings schema version number.
+settings schema version number.
 
 ---
 
@@ -46,6 +59,8 @@ DNS server setting for fixed IP, settings schema version number.
 - **LEDs** (active high, direct GPIO, ≈220 Ω): defaults in source: Wi-Fi D0=GPIO1, HR D1=GPIO2,
   Cadence/Power D3=GPIO4, DirCon D4=GPIO5. *The author's own build may use other pins — keep the author's
   `LED_*_GPIO` defines when a new file is produced.* Front order left→right: Wi-Fi, HR, Cadence/Power, DirCon.
+  The HR and Cadence/Power LEDs are plain on/off outputs (no PWM). From 2026.2.1 they go off for 0.2 s every 3 s
+  while the connected sensor's battery is below 25 %.
 - **Buttons** (to GND, internal pull-up, software debounce 40 ms): Pairing = D9 = GPIO8 (left, back);
   Wi-Fi setup = D10 = GPIO9 (right, back). Both are read **only at power-on**.
 - **Power:** USB-C 5 V. Box: LEDs front, USB-C back middle, two buttons back.
@@ -58,7 +73,7 @@ DNS server setting for fixed IP, settings schema version number.
 ## 3. Toolchain and build
 
 - Arduino IDE 2.x, board *XIAO_ESP32S3*, **Arduino-ESP32 core 3.x**, **NimBLE-Arduino 2.x**.
-- Sketch folder name must equal the `.ino` name (e.g. `dircon_bridge_2026.1.1`).
+- Sketch folder name must equal the `.ino` name (e.g. `dircon_bridge_2026.2.1`).
 - Libraries used from the core: WiFi, WebServer, DNSServer, ESPmDNS, ESP-IDF `mdns.h`, Preferences, Update.
 - `DEBUG_SERIAL 0` for normal use (an unread USB serial port can stall); set 1 only for debugging
   (then `[BOOT]`, `[WiFi]`, `[MAINT]`, `[RESET]`, `[OTA]`, `[BLE]`, `[PAIR]`, `[STAT]` logs appear).
@@ -74,7 +89,8 @@ DNS server setting for fixed IP, settings schema version number.
 
 ## 4. Versioning and release process
 
-- Scheme **year.major.minor**: `2026.1.1`. Production started at **2026.1.0**; earlier 2026.0.x were beta.
+- Scheme **year.major.minor**: `2026.2.1`. Production started at **2026.1.0**; earlier 2026.0.x were beta.
+  `2026.2.dev` was used for the development builds that became 2026.2.1.
 - Set in three places: file name, header comment (`Version:`), `#define FIRMWARE_VERSION`. It is shown in
   every page footer.
 - Bump the minor number when the author asks ("update the minor version"). If the assistant bumps it on
@@ -83,11 +99,12 @@ DNS server setting for fixed IP, settings schema version number.
   (e.g. `DirCon_Bridge_<ver>_recovery.bin`) → update release notes → regenerate the manual if the UI or
   behaviour changed → publish.
 - Documents produced so far: **User manual** (PDF, A4, 12 pages, for the current firmware), **Device Recovery
-  Guide** (PDF, A4, 4 pages, version-independent), **Release notes 2026.1.1** (MD).
+  Guide** (PDF, A4, 4 pages, version-independent), **Release notes 2026.1.1** (MD). The manual and release notes
+  have **not** been updated for 2026.2.1 yet; there are no release notes for 2026.2.1.
 
 ---
 
-## 5. Source layout (`dircon_bridge_<ver>.ino`, ≈2000 lines, single file)
+## 5. Source layout (`dircon_bridge_<ver>.ino`, ≈2100 lines, single file)
 
 Order in the file:
 
@@ -102,10 +119,13 @@ Order in the file:
    (plain char copy for the web task), `ScanCallbacks`, `connectSensor`, `pollSensor`, `bleTask`, `bleBegin`.
 5. DirCon side: `DirconDevice` class (TCP server per group, framing, subscriptions, pending reads, mDNS
    advertise via `mdns_service_add("_wahoo-fitness-tnp")`, `buildInstance()` naming), `mdnsRefresh()`, `buildGroups()`.
-6. LEDs (`ledsBegin`, `ledsUpdate`), pairing (`loadFilters`, `runPairing`, `buttonHeldAtBoot`).
+   The client table is `clients[MAX_CLIENTS_LIMIT]` (5); the number actually accepted is `cfgMaxClients` (setting, default
+   `MAX_CLIENTS` = 2), applied where `poll()` assigns a free slot or evicts the oldest.
+6. `batteryPercent(i)` (cached battery level of a connected sensor, -1 = unknown; used by the status page and the LEDs),
+   LEDs (`ledsBegin`, `slotBatteryLow`, `ledsUpdate`), pairing (`loadFilters`, `runPairing`, `buttonHeldAtBoot`).
 7. Wi-Fi setup mode (`runWifiSetup`, `PAGE_HEAD` CSS raw string, `pageHeader(sub)`, `pageFooter`, handlers).
 8. Settings (`loadSettings/saveSettings`, `checkFixedIp`, maintenance flag, `eraseAllSettings`), `connectWifi`,
-   `beginMdnsHost`, status page + `statusTask`, maintenance page (`sensorsSection`, `maintPage`, handlers,
+   `beginMdnsHost`, status page (`slotStatus`, `slotConns`, `statusPage`) + `statusTask`, maintenance page (`sensorsSection`, `maintPage`, handlers,
    firmware upload, factory, restart, `runMaintenance`).
 9. Factory reset gesture (`factoryResetGesture`), `setup()`, `loop()`.
 
@@ -151,8 +171,10 @@ are ignored by older firmware, so downgrades keep working.
 | `wifi` | `ssid`, `pass` | string | home network; no SSID → Wi-Fi setup starts |
 | `settings` | `group` | uchar | 1 = separate devices (default), 0 = combined |
 | `settings` | `name` | string | device name ≤ 20 chars `[A-Za-z0-9 -_]`; empty = MAC suffix |
+| `settings` | `maxcl` | uchar | maximum app connections per DirCon device, 2..5; missing/out of range → 2 (added in 2026.2.1) |
 | `settings` | `dhcp` | bool | true (default) = DHCP; saving a Wi-Fi network in setup mode resets it to true |
 | `settings` | `ip`, `mask`, `gw` | string | fixed address; invalid/missing → DHCP; gateway `0.0.0.0` = none |
+| `settings` | `dns` | string | optional DNS server for the fixed address; invalid/missing/`0.0.0.0` = none (added in 2026.2.1) |
 | `settings` | `maint` | bool | transient: enter maintenance on next boot (cleared at boot) |
 
 Factory reset erases all three namespaces.
@@ -165,11 +187,17 @@ Factory reset erases all three namespaces.
 |---|---|
 | Wi-Fi setup (AP, DNS wildcard) | `GET /`, `GET /scan`, `POST /save`, anything else → redirect to `/` |
 | Normal operation (status) | `GET /` (auto-refresh 5 s), `POST /maint`, anything else → redirect |
-| Maintenance | `GET /`, `POST /dircon` (group, name), `POST /network` (net, ip, mask, gw), `POST /pair` (slot, act=pair/unpair), `POST /update` (multipart `firmware`), `POST /factory`, `POST /restart` |
+| Maintenance | `GET /`, `POST /dircon` (group, name, maxcl), `POST /network` (net, ip, mask, gw, dns), `POST /pair` (slot, act=pair/unpair), `POST /update` (multipart `firmware`), `POST /factory`, `POST /restart` |
 
 - Maintenance page = four cards (DirCon setup, Network setup, Sensors, System) + green **Leave maintenance mode**.
 - DirCon and Network cards save **independently**; both call `saveSettings(cfgGroup, cfgName)` which writes all
-  `cfg*` globals, so each handler must update only its own globals first.
+  `cfg*` globals (`cfgMaxClients` and `cfgDns` included), so each handler must update only its own globals first.
+- DirCon setup card: layout, device name, **Maximum concurrent connections per sensor** (select 2..5, with a warning
+  that more than 2 can cause issues). Network setup card: IP mode, IP, mask, gateway, **DNS server (optional)**.
+- Status page rows: Wi-Fi, IP address, Heart rate, `App connections` (indented, `actual/maximum` of the device serving
+  the HR slot), Power / cadence, `App connections` (same for slot 1), Layout, Uptime. After a sensor name the battery
+  is shown as `(icon NN%)` in green (> 50), orange (25..50) or red (< 25); CSS classes `.bg .bm .br`; the icon is an
+  inline SVG that takes the text colour.
 - Firmware upload: `Update.begin(UPDATE_SIZE_UNKNOWN)`, write chunks, `Update.end(true)`; failure shows an
   error and keeps the running firmware; success restarts. File picker is a styled label; upload button is
   disabled/grey until a file is chosen, then blue (small inline JS).
@@ -186,13 +214,20 @@ Factory reset erases all three namespaces.
 - A DirCon device is advertised/accepts apps only when `readyMask()` ≠ 0; changes of the connected set
   make the device re-announce and (combined layout) drop app connections once.
 - Group = DirCon device: group 0 = HR (+ slot 1 when combined), group 1 = slot 1 when separate. TCP ports
-  `36866 + group`. `MAX_CLIENTS` 2 per device.
+  `36866 + group`. Max. app connections per device = `cfgMaxClients` (default 2). At the limit a new connection evicts the
+  oldest of that device. The limit is per device, not a total over all devices (so the status page can show more connections
+  in total than the maximum).
 - `buildInstance()`: combined (more than one slot in the group) → `DEVICE_NAME_PREFIX " Sensors"`; otherwise
   `DirCon <sensor name>` (connected row of the slot, else first row), then ` <custom name>` or ` <MAC4>`.
 - Pairing mode: RSSI ≥ `PAIR_MIN_RSSI` (−80); trainers excluded; LED blinks while searching, solid when found;
   ends automatically 1.5 s after both found or by a second button press; start clears stored pairings first.
 - Slot logic: if any row of a slot has a stored address, the other rows of that slot are `disabled`.
-- Battery: polled every `BATTERY_POLL_MS`, served from cache, notified on change; hidden in combined layout.
+- Battery: polled every `BATTERY_POLL_MS`, served from cache, notified on change; hidden from the apps in combined layout
+  (the status page and the low-battery LED still use the cached value).
+- Low-battery LED: `ledsUpdate()` switches the HR / Cadence-Power LED off for `BATT_DIP_LEN_MS` (200 ms) every
+  `BATT_DIP_PERIOD_MS` (3000 ms) while `batteryPercent()` is 0..24 for the connected sensor of that slot. Unknown level = no signal.
+  The battery is polled every 5 min, so the signal can lag behind the real level.
+- The bridge cannot tell apps apart: DirCon has no app identity, only the TCP client's IP address is visible (not shown anywhere).
 - Factory reset gesture: after the LED self-test, both buttons held: 10 s (LEDs off) → all on → one LED off
   every 3 s right→left (DirCon, Cad/Pwr, HR, Wi-Fi) → 3 flashes → erase + restart. Release of either button
   (40 ms debounce) aborts and boot continues as if no button was pressed.
@@ -208,9 +243,13 @@ Factory reset erases all three namespaces.
 - Router on channel 12–14 might not be found if the stack's channel set excludes it (not observed).
 - OTA has no automatic rollback; a faulty-but-booting firmware must be replaced by upload or USB recovery.
   A boot-loop guard / settings reset after repeated failed starts was suggested but not built.
+- Cosmetic, seen once: after a sensor left BLE range and came back, the status page / Model # showed only the manufacturer
+  without the sensor name until restart. Likely cause (from reading, not reproduced): `connectSensor()` takes the name from the
+  first scan result; if that has no name, `devName` falls back to the manufacturer and is not updated while connected.
+  Heart rate processing was not affected. Not fixed.
 - The two-button check runs after the LED self-test and after reading Wi-Fi credentials/maintenance flag,
   not as the very first statement of `setup()`.
-- Possible additions: password for the web pages, settings schema version, DNS server for fixed IP, secure-BLE
+- Possible additions: password for the web pages, settings schema version, secure-BLE
   bonding for HR straps that require it, `_http._tcp` mDNS advertisement, ANT+ (needs different hardware).
 
 ---
@@ -227,7 +266,9 @@ Factory reset erases all three namespaces.
   Windows/macOS/Linux).
 - `cp1.png`, `cp2.png` — captive-portal screenshots; `rouvy_crop.png` — Rouvy device details screenshot.
 - Manual text must stay consistent with firmware (LED meanings, button table, page cards, section
-  cross-references). The manual currently describes firmware **2026.1.1**.
+  cross-references). The manual currently describes firmware **2026.1.1**. For 2026.2.1 it needs: status page with battery
+  level and per-sensor app connections, the new maintenance setting, the DNS field, and the low-battery LED behaviour;
+  re-run `gen_shots.py` (the status and maintenance pages changed).
 - GPL v3 is stated in the manual's small print; the repository needs a matching `LICENSE` file.
 
 ---
@@ -243,5 +284,6 @@ Factory reset erases all three namespaces.
 - Deliver files with the file-send tool; manuals as PDF (A4, blue header band on each page, blue footer band),
   release notes / this reference as Markdown.
 - Be explicit about what is untested. Disclose any unrequested change.
+- Ideas that were discussed but not decided are not written into this file unless the author asks.
 - Typical request pattern for the future: attach the current `.ino` and this file, describe the change, and say
   whether the manual, recovery guide, release notes and version number should be updated too.
