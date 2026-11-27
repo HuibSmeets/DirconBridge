@@ -1,0 +1,100 @@
+# Builds the DirCon Bridge firmware whenever a .ino file is committed.
+# Place this file at .github/workflows/build-firmware.yml in the repository.
+#
+# Output per changed .ino (e.g. dircon_bridge_2026.2.1.ino):
+#   dircon_bridge_2026.2.1.bin           regular update (maintenance page upload, app only)
+#   dircon_bridge_2026.2.1_recovery.bin  merged image, flash at 0x0 over USB
+# Both are stored as a workflow artifact and attached to a GitHub Release "v<FIRMWARE_VERSION>".
+name: Build firmware
+
+on:
+#  push:
+#    paths:
+#      - '**.ino'
+  workflow_dispatch:        # manual run: builds every .ino in the repository
+     sketch:
+        description: 'Path of the .ino to build (empty = every .ino in the repository)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write           # needed to create/update the release
+
+env:
+  # Same as Arduino IDE 2.x: board XIAO_ESP32S3 with its default menu options.
+  # Keep the partition scheme identical for every release (see PROJECT_REFERENCE.md).
+  FQBN: esp32:esp32:XIAO_ESP32S3
+  ESP32_CORE: 3.3.0         # Arduino-ESP32 core; change to the version you build with in the IDE
+  NIMBLE_VERSION: 2.3.0     # NimBLE-Arduino 2.x; change to the version you build with in the IDE
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed .ino files
+        id: find
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only --diff-filter=AM "${{ github.event.before }}" "${{ github.sha }}" -- '*.ino' > ino_list.txt
+          else
+            git ls-files '*.ino' > ino_list.txt
+          fi
+          echo "Sketches to build:"; cat ino_list.txt
+          [ -s ino_list.txt ] || echo "none" 
+
+      - name: Set up arduino-cli
+        uses: arduino/setup-arduino-cli@v2
+
+      - name: Install ESP32 core and libraries
+        run: |
+          arduino-cli config init
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install esp32:esp32@${ESP32_CORE}
+          arduino-cli lib install "NimBLE-Arduino@${NIMBLE_VERSION}"
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          while IFS= read -r ino; do
+            [ -n "$ino" ] || continue
+            name=$(basename "$ino" .ino)
+            # arduino-cli needs folder name == sketch name: build from a clean copy
+            sk="$RUNNER_TEMP/sketch/$name"
+            rm -rf "$sk"; mkdir -p "$sk"
+            cp "$ino" "$sk/$name.ino"
+            arduino-cli compile --fqbn "$FQBN" --export-binaries --output-dir "$RUNNER_TEMP/out/$name" "$sk"
+            cp "$RUNNER_TEMP/out/$name/$name.ino.bin"        "dist/$name.bin"
+            cp "$RUNNER_TEMP/out/$name/$name.ino.merged.bin" "dist/${name}_recovery.bin"
+            ver=$(grep -m1 -oP '#define\s+FIRMWARE_VERSION\s+"\K[^"]+' "$ino" || true)
+            echo "$name|${ver}" >> dist/versions.txt
+          done < ino_list.txt
+          ls -l dist
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ github.sha }}
+          path: |
+            dist/*.bin
+          if-no-files-found: error
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while IFS='|' read -r name ver; do
+            [ -n "$ver" ] || { echo "No FIRMWARE_VERSION in $name, release skipped"; continue; }
+            tag="v$ver"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "dist/$name.bin" "dist/${name}_recovery.bin" --clobber
+            else
+              gh release create "$tag" "dist/$name.bin" "dist/${name}_recovery.bin" \
+                --target "${{ github.sha }}" --title "Firmware $ver" \
+                --notes "Regular update: \`$name.bin\` (maintenance page). Recovery: \`${name}_recovery.bin\` (flash at 0x0 over USB)."
+            fi
+          done < dist/versions.txt
