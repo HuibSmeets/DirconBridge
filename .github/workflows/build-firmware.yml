@@ -1,4 +1,4 @@
-# Builds the DirCon Bridge firmware whenever a .ino file is committed.
+# Builds the DirCon Bridge firmware, started manually (Actions tab > Build firmware > Run workflow).
 # Place this file at .github/workflows/build-firmware.yml in the repository.
 #
 # Output per changed .ino (e.g. dircon_bridge_2026.2.1.ino):
@@ -11,8 +11,10 @@ on:
 #  push:
 #    paths:
 #      - '**.ino'
-  workflow_dispatch:        # manual run: builds every .ino in the repository
-     sketch:
+
+  workflow_dispatch:
+    inputs:
+      sketch:
         description: 'Path of the .ino to build (empty = every .ino in the repository)'
         required: false
         default: ''
@@ -35,16 +37,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Find changed .ino files
+      - name: Find .ino files
         id: find
         run: |
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            git diff --name-only --diff-filter=AM "${{ github.event.before }}" "${{ github.sha }}" -- '*.ino' > ino_list.txt
+          if [ -n "${{ inputs.sketch }}" ]; then
+            echo "${{ inputs.sketch }}" > ino_list.txt
           else
             git ls-files '*.ino' > ino_list.txt
           fi
           echo "Sketches to build:"; cat ino_list.txt
-          [ -s ino_list.txt ] || echo "none" 
+          [ -s ino_list.txt ] || { echo "No .ino found"; exit 1; }
 
       - name: Set up arduino-cli
         uses: arduino/setup-arduino-cli@v2
@@ -91,6 +93,10 @@ jobs:
             [ -n "$ver" ] || { echo "No FIRMWARE_VERSION in $name, release skipped"; continue; }
             tag="v$ver"
             if gh release view "$tag" >/dev/null 2>&1; then
+              # The "Source code" zip/tar.gz of a release is generated from its tag. Move the tag to the
+              # commit that was just built, otherwise those archives keep the old source.
+              git tag -f "$tag" "${{ github.sha }}"
+              git push origin "refs/tags/$tag" --force
               gh release upload "$tag" "dist/$name.bin" "dist/${name}_recovery.bin" --clobber
             else
               gh release create "$tag" "dist/$name.bin" "dist/${name}_recovery.bin" \
