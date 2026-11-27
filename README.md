@@ -65,12 +65,21 @@ DirCon device. Each connected sensor appears as its own device (or all in one, i
 
 | Part | Notes |
 |---|---|
-| **Seeed XIAO ESP32S3** | The target board (any ESP32-S3 should work) |
+| **Seeed XIAO ESP32S3** | The target board |
 | 4 LEDs + resistors (~220 Ω) | Wi-Fi (D0), HR (D1), Cadence/Power (D3), DirCon (D4); pins are `#define`s |
 | 2 push buttons to GND | Pairing = D9 (GPIO8), Wi-Fi setup = D10 (GPIO9); internal pull-ups used |
 | USB-C power | Any 5 V USB charger |
 
 Wi-Fi is **2.4 GHz only**. Schematic and enclosure files: *add your own links here*.
+
+### Compatibility
+
+The firmware binaries (`<name>.bin` and `<name>_recovery.bin`, or `.ino.bin` / `.ino.merged.bin` when exported
+from the Arduino IDE) are built **only for the PulseFlow Engineering product**, based on the Seeed XIAO
+ESP32S3 with its specific LED and button wiring. They are **not compatible** with other ESP32 platforms
+(ESP32, ESP32-S2, ESP32-C3 and so on), nor with other ESP32-S3 boards or different wiring or schematics.
+Flashing them on other hardware can leave the device unable to start, and it may need a recovery flash.
+Building for other hardware means adapting the pin definitions in the source and compiling it yourself.
 
 ## Quick start
 
