@@ -17,7 +17,7 @@ continue in a new conversation without any memory of earlier ones. Give this fil
 3. **Maintenance page, DirCon setup card:** new select "Maximum concurrent connections per sensor" (2..5, default 2) below the device name, with a warning that more than 2 can cause issues. The limit is enforced **per DirCon device**; a new connection at the limit evicts the oldest one of that device.
 4. **Low-battery LED:** a connected sensor with a battery level below 25 % has its LED (HR or Cadence/Power) turned off for 0.2 s every 3 s. Always active, no setting.
 5. **Fixed IP: DNS server:** optional "DNS server" field in the Network setup card (stored as `dns`, passed to `WiFi.config()` when set; empty = as before).
-6. **Version:** `2026.2.1` in file name, header comment and `FIRMWARE_VERSION`. Nothing in the user manual, recovery guide or release notes has been updated for these changes yet.
+6. **Version:** `2026.2.1` in file name, header comment and `FIRMWARE_VERSION`. The user manual (regenerated from `doc_sources/`) and the release notes describe these changes; the recovery guide is version-independent and unchanged.
 
 ---
 
@@ -99,8 +99,8 @@ settings schema version number.
   (e.g. `DirCon_Bridge_<ver>_recovery.bin`) → update release notes → regenerate the manual if the UI or
   behaviour changed → publish.
 - Documents produced so far: **User manual** (PDF, A4, 12 pages, for the current firmware), **Device Recovery
-  Guide** (PDF, A4, 4 pages, version-independent), **Release notes 2026.1.1** (MD). The manual and release notes
-  have **not** been updated for 2026.2.1 yet; there are no release notes for 2026.2.1.
+  Guide** (PDF, A4, 4 pages, version-independent), **Release notes 2026.1.1** (MD). The user manual (PDF, 12 pages) and the
+  release notes (new 2026.2.1 section on top of the 2026.1.1 notes) have been updated for 2026.2.1.
 
 ---
 
@@ -266,9 +266,10 @@ Factory reset erases all three namespaces.
   Windows/macOS/Linux).
 - `cp1.png`, `cp2.png` — captive-portal screenshots; `rouvy_crop.png` — Rouvy device details screenshot.
 - Manual text must stay consistent with firmware (LED meanings, button table, page cards, section
-  cross-references). The manual currently describes firmware **2026.1.1**. For 2026.2.1 it needs: status page with battery
-  level and per-sensor app connections, the new maintenance setting, the DNS field, and the low-battery LED behaviour;
-  re-run `gen_shots.py` (the status and maintenance pages changed).
+  cross-references). The manual currently describes firmware **2026.2.1** (`VERSION` in `make_manual2.py`). After a UI change: run
+  `python3 gen_shots.py <firmware>.ino` (writes `setup_1/2`, `status_full`, `maint_a/b/c` = three parts of the maintenance page),
+  then `make_manual2.py`. Image heights come from the PNG files (`img_h`). `gen_shots.py` is a hand-ported copy of the pages' HTML:
+  compare it with `statusPage()` / `maintPage()` when those change. Page 5 now uses the generated Wi-Fi setup shots (not phone captures).
 - GPL v3 is stated in the manual's small print; the repository needs a matching `LICENSE` file.
 
 ---
