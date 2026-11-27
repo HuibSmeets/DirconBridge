@@ -1,3 +1,4 @@
+
 /*
  * BLE -> Wahoo Direct Connect (DirCon) bridge: BLE heart rate sensor + cadence sensor / power meter
  * Version: 2026.2.1 (year.major.minor, see FIRMWARE_VERSION)
@@ -449,17 +450,29 @@ static void publishModel(uint8_t i) {
 static bool connectSensor(uint8_t i) {
   SensorRT& r = rt[i];
   const SensorDef& d = SENSORS[i];
+  // Copy what the scan found BEFORE releasing hasFound: while hasFound is set the scan callback leaves
+  // these strings alone; once it is cleared the callback may write them again at any moment.
+  const std::string foundAddr = r.foundAddr, foundName = r.foundName;
+  const uint8_t foundType = r.foundType;
   r.hasFound = false;
 
   LOG("[BLE] connecting %s ...\n", d.name);
-  if (!r.client->connect(NimBLEAddress(r.foundAddr, r.foundType))) {
+  if (!r.client->connect(NimBLEAddress(foundAddr, foundType))) {
     LOG("[BLE] %s connect failed\n", d.name);
     return false;
   }
 
-  // Values from an earlier connection may be stale: mark them as not yet read in this one.
+  // Values from an earlier connection may be stale: mark them as not yet read in this one. A polled
+  // value (battery level) is dropped altogether until it has been read again: it may belong to another
+  // sensor, and an app that reads it meanwhile is held (see parkRead) instead of getting the old value.
   for (uint8_t si = 0; si < d.numServices; si++)
-    for (uint8_t ci = 0; ci < d.services[si].numChars; ci++) r.cache[si][ci].settled = false;
+    for (uint8_t ci = 0; ci < d.services[si].numChars; ci++) {
+      CharCache& cc = r.cache[si][ci];
+      portENTER_CRITICAL(&cacheMux);
+      cc.settled = false;
+      if (d.services[si].chars[ci].props & PROP_POLLED) cc.valid = false;
+      portEXIT_CRITICAL(&cacheMux);
+    }
 
   // The Model # that the DirCon app shows = manufacturer of the sensor + its BLE name. The name
   // alone is often just a number. The manufacturer is read from the sensor's own Device Information
@@ -474,13 +487,13 @@ static bool connectSensor(uint8_t i) {
       while (!manuf.empty() && (manuf.back() == '\0' || manuf.back() == ' ')) manuf.pop_back();   // trim
     }
   }
-  r.devName = r.foundName;
+  r.devName = foundName;
   if (!manuf.empty()) {
     // Do not repeat the brand when the BLE name already starts with it ("<Brand> Sense ..." + "<Brand> Electro Oy").
     std::string brand = manuf.substr(0, manuf.find(' '));
-    bool dup = r.foundName.size() >= brand.size() &&
-               strncasecmp(r.foundName.c_str(), brand.c_str(), brand.size()) == 0;
-    if (!dup) r.devName = r.foundName.empty() ? manuf : manuf + " " + r.foundName;
+    bool dup = foundName.size() >= brand.size() &&
+               strncasecmp(foundName.c_str(), brand.c_str(), brand.size()) == 0;
+    if (!dup) r.devName = foundName.empty() ? manuf : manuf + " " + foundName;
   }
   LOG("[BLE] %s manufacturer '%s', Model # '%s'\n", d.name, manuf.c_str(), r.devName.c_str());
   strlcpy(devNameC[i], r.devName.c_str(), sizeof(devNameC[i]));
@@ -628,14 +641,16 @@ enum : uint8_t {
   RC_CHAR_NOT_FOUND = 4, RC_OP_NOT_SUPPORTED = 5,
 };
 
-static void sendMsg(WiFiClient& s, uint8_t id, uint8_t seq, uint8_t rc,
+// Returns false when the whole message could not be handed to the TCP stack (client gone, Wi-Fi down,
+// client not reading): the caller then drops the client.
+static bool sendMsg(WiFiClient& s, uint8_t id, uint8_t seq, uint8_t rc,
                     const uint8_t* payload, size_t n) {
   uint8_t out[6 + 160];
   if (n > 160) n = 0;
   out[0] = DC_VERSION; out[1] = id; out[2] = seq; out[3] = rc;
   out[4] = n >> 8;     out[5] = n & 0xFF;
   if (n) memcpy(out + 6, payload, n);
-  s.write(out, 6 + n);
+  return s.write(out, 6 + n) == 6 + n;
 }
 
 // Detect an app that vanished without closing the connection (crash, Wi-Fi loss, power off) within
@@ -857,7 +872,7 @@ class DirconDevice {
         rc = RC_UNKNOWN_MSG;
     }
     LOG("[DirCon] %s: request 0x%02X -> reply code %u (%u bytes)\n", instance.c_str(), id, rc, (unsigned)pn);
-    sendMsg(cl.sock, id, seq, rc, rc == RC_OK ? pl : nullptr, rc == RC_OK ? pn : 0);
+    if (!sendMsg(cl.sock, id, seq, rc, rc == RC_OK ? pl : nullptr, rc == RC_OK ? pn : 0)) writeFailed(cl);
   }
 
   // ---- held-back read replies ----
@@ -890,9 +905,10 @@ class DirconDevice {
       }
       LOG("[DirCon] %s: held read 0x%04X answered (%s)\n", instance.c_str(),
           SENSORS[pr.s].services[pr.a].chars[pr.c].uuid, have ? "value" : "timeout");
-      sendMsg(cl.sock, DC_READ_CHARACTERISTIC, pr.seq, have ? RC_OK : RC_UNEXPECTED,
-              have ? pl : nullptr, have ? pn : 0);
+      bool sent = sendMsg(cl.sock, DC_READ_CHARACTERISTIC, pr.seq, have ? RC_OK : RC_UNEXPECTED,
+                          have ? pl : nullptr, have ? pn : 0);
       pr.active = false;
+      if (!sent) { writeFailed(cl); return; }
     }
   }
 
@@ -904,10 +920,11 @@ class DirconDevice {
     memcpy(pl + 16, data, len);
     for (auto& cl : clients)
       if (cl.active && cl.sock.connected() && ((cl.subs[s][a] >> c) & 1))
-        sendMsg(cl.sock, DC_NOTIFICATION, 0, RC_OK, pl, 16 + len);
+        if (!sendMsg(cl.sock, DC_NOTIFICATION, 0, RC_OK, pl, 16 + len)) writeFailed(cl);
   }
 
   // ---- TCP housekeeping, call often from loop() ----
+  void writeFailed(Client& cl);          // defined after drop()
   void drop(Client& cl) {
     cl.sock.stop();
     cl.active = false;
@@ -962,6 +979,7 @@ class DirconDevice {
         size_t total = 6 + plen;
         if (cl.len < total) break;
         handle(cl, cl.buf[1], cl.buf[2], cl.buf + 6, plen);
+        if (!cl.active) break;                                 // dropped meanwhile (write failed): buffer is gone
         memmove(cl.buf, cl.buf + total, cl.len - total);
         cl.len -= total;
       }
@@ -971,6 +989,11 @@ class DirconDevice {
 
   int clientCount() { int n = 0; for (auto& cl : clients) n += cl.active; return n; }
 };
+
+void DirconDevice::writeFailed(Client& cl) {
+  LOG("[DirCon] %s: write failed, closing client\n", instance.c_str());
+  drop(cl);
+}
 
 static DirconDevice* groups[MAX_GROUPS] = {nullptr};
 static uint8_t numGroups = 0;

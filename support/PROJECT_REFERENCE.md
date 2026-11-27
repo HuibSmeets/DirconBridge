@@ -17,7 +17,11 @@ continue in a new conversation without any memory of earlier ones. Give this fil
 3. **Maintenance page, DirCon setup card:** new select "Maximum concurrent connections per sensor" (2..5, default 2) below the device name, with a warning that more than 2 can cause issues. The limit is enforced **per DirCon device**; a new connection at the limit evicts the oldest one of that device.
 4. **Low-battery LED:** a connected sensor with a battery level below 25 % has its LED (HR or Cadence/Power) turned off for 0.2 s every 3 s. Always active, no setting.
 5. **Fixed IP: DNS server:** optional "DNS server" field in the Network setup card (stored as `dns`, passed to `WiFi.config()` when set; empty = as before).
-6. **Version:** `2026.2.1` in file name, header comment and `FIRMWARE_VERSION`. The user manual (regenerated from `doc_sources/`) and the release notes describe these changes; the recovery guide is version-independent and unchanged.
+6. **Robustness fixes (no user-visible feature, version unchanged):**
+   - *Stale battery value:* `connectSensor()` clears `valid` of the polled battery characteristic on every connect. An app reading the battery before the new sensor has answered is held (`parkRead`, up to `BATTERY_READ_WAIT_MS`) instead of receiving the previous sensor's value. Status page shows no battery until read.
+   - *Scan result copy:* `connectSensor()` copies `foundAddr`, `foundType` and `foundName` to locals before clearing `hasFound`, so the scan callback cannot overwrite them while connecting.
+   - *Failed writes:* `sendMsg()` returns `bool` (all bytes written). On failure the caller calls `DirconDevice::writeFailed()` which logs and `drop()`s the client (in `handle()`, `servePending()` and `notify()`). `poll()` checks `if (!cl.active) break;` after `handle()`, because `drop()` sets `cl.len = 0` and the following `cl.len -= total` would underflow.
+7. **Version:** `2026.2.1` in file name, header comment and `FIRMWARE_VERSION`. The user manual (regenerated from `doc_sources/`) and the release notes describe these changes; the recovery guide is version-independent and unchanged.
 
 ---
 
